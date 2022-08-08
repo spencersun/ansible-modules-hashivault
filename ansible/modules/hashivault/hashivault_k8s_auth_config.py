@@ -99,7 +99,15 @@ def hashivault_k8s_auth_config(module):
 
     if not module.check_mode:
         client.auth.kubernetes.configure(**desired_state)
-    return {'changed': True, 'keys_updated': keys_updated}
+
+    diff_header='/'.join(['auth', mount_point, 'config'])
+    diff = dict(
+        before=current_state,
+        before_header=diff_header,
+        after={k: v for k, v in desired_state.iteritems() if k not in ignore_list},
+        after_header=diff_header,
+    )
+    return {'changed': True, 'keys_updated': keys_updated, 'diff': diff}
 
 
 if __name__ == '__main__':

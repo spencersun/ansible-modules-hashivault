@@ -3,6 +3,7 @@ from ansible.module_utils.hashivault import hashivault_argspec
 from ansible.module_utils.hashivault import hashivault_auth_client
 from ansible.module_utils.hashivault import hashivault_init
 from ansible.module_utils.hashivault import hashiwrapper
+from hvac.exceptions import InvalidPath
 
 ANSIBLE_METADATA = {'status': ['stableinterface'], 'supported_by': 'community', 'version': '1.1'}
 DOCUMENTATION = '''
@@ -60,8 +61,8 @@ def main():
     argspec['token_bound_cidrs'] = dict(required=False, type='list', default=[])
     argspec['state'] = dict(required=False, choices=['present', 'absent'], default='present')
     argspec['mount_point'] = dict(required=False, type='str', default='userpass')
-    module = hashivault_init(argspec)
-    result = hashivault_userpass(module.params)
+    module = hashivault_init(argspec, supports_check_mode=True)
+    result = hashivault_userpass(module)
     if result.get('failed'):
         module.fail_json(**result)
     else:
@@ -69,7 +70,7 @@ def main():
 
 
 def hashivault_userpass_update(client, user_details, user_name, user_pass, user_pass_update, user_policies,
-                               mount_point, token_bound_cidrs):
+                               mount_point, token_bound_cidrs, check_mode=False):
     policies_changed = False
     token_bound_cidrs_changed = False
     password_change_allowed = user_pass_update and user_pass
@@ -77,38 +78,55 @@ def hashivault_userpass_update(client, user_details, user_name, user_pass, user_
     if set(user_details['data'].get('policies', [])) != set(user_policies):
         policies_changed = True
 
-    if set(user_details['data']['token_bound_cidrs']) != set(token_bound_cidrs):
+    existing_cidrs = user_details['data']['bound_cidrs']
+    if set(existing_cidrs if existing_cidrs is not None else []) != set(token_bound_cidrs):
         token_bound_cidrs_changed = True
 
     attribute_changed = policies_changed or token_bound_cidrs_changed
 
-    if password_change_allowed and not attribute_changed:
-        client.update_userpass_password(user_name, user_pass, mount_point=mount_point)
-        return {'changed': True}
+    if token_bound_cidrs_changed and not password_change_allowed:
+        err_msg = u"token_bound_cidrs can only be changed if user_pass is specified and user_pass_update is True"
+        return {
+            'rc': 1,
+            'failed': True,
+            'msg': err_msg
+        }
 
-    if password_change_allowed and attribute_changed:
-        client.create_userpass(user_name, user_pass, user_policies, mount_point=mount_point,
-                               token_bound_cidrs=token_bound_cidrs)
-        return {'changed': True}
+    if password_change_allowed or attribute_changed:
+        diff_header='/'.join(['auth', 'userpass', 'users', user_name])
+        diff = dict(
+            before=dict(
+                policies=user_details['data'].get('policies', []),
+                token_bound_cidrs=user_details['data']['bound_cidrs'],
+            ),
+            before_header=diff_header,
+            after=dict(
+                policies=user_policies,
+                token_bound_cidrs=token_bound_cidrs,
+            ),
+            after_header=diff_header,
+        )
+        kwargs = dict(mount_point=mount_point)
 
-    if not password_change_allowed and attribute_changed:
-        if token_bound_cidrs_changed:
-            err_msg = u"token_bound_cidrs can only be changed if user_pass is specified and user_pass_update is True"
-            return {
-                'rc': 1,
-                'failed': True,
-                'msg': err_msg
-            }
+        if password_change_allowed:
+            diff['before']['password'] = '(unknown)'
+            diff['after']['password'] = 'XXXXXXXX' # no_log = True anyway
+            kwargs.update(
+                password=user_pass,
+                token_bound_cidrs=token_bound_cidrs,
+            )
 
-        if policies_changed:
-            client.update_userpass_policies(user_name, user_policies, mount_point=mount_point)
-            return {'changed': True}
+        if not check_mode:
+            client.auth.userpass.create_or_update_user(user_name, user_pass, user_policies, **kwargs)
+
+        return {'changed': True, 'diff': diff}
 
     return {'changed': False}
 
 
 @hashiwrapper
-def hashivault_userpass(params):
+def hashivault_userpass(module):
+    params = module.params
     client = hashivault_auth_client(params)
     state = params.get('state')
     name = params.get('name')
@@ -119,18 +137,30 @@ def hashivault_userpass(params):
     mount_point = params.get('mount_point')
     if state == 'present':
         try:
-            user_details = client.read_userpass(name, mount_point=mount_point)
-        except Exception:
+            user_details = client.auth.userpass.read_user(name, mount_point=mount_point)
+        except InvalidPath:
+            user_details = None
+        if user_details is None:
             if password is not None:
-                client.create_userpass(name, password, policies, token_bound_cidrs=token_bound_cidrs,
-                                       mount_point=mount_point)
-                return {'changed': True}
-            else:
-                return {'failed': True, 'msg': 'pass must be provided for new users'}
-        else:
-            return hashivault_userpass_update(client, user_details, user_name=name, user_pass=password,
+                diff = dict(
+                    before='',
+                    before_header='(absent)',
+                    after=dict(
+                        password='XXXXXXXX', # no_log=True anyway
+                        policies=policies,
+                        token_bound_cidrs=token_bound_cidrs,
+                    ),
+                    after_header='/'.join(['auth', 'userpass', 'users', name]),
+                )
+                if not module.check_mode:
+                    client.auth.userpass.create_or_update_user(name, password, policies, token_bound_cidrs=token_bound_cidrs,
+                                                               mount_point=mount_point)
+                return {'changed': True, 'diff': diff}
+            return {'failed': True, 'msg': 'pass must be provided for new users'}
+        return hashivault_userpass_update(client, user_details, user_name=name, user_pass=password,
                                               user_pass_update=password_update, user_policies=policies,
-                                              mount_point=mount_point, token_bound_cidrs=token_bound_cidrs)
+                                              mount_point=mount_point, token_bound_cidrs=token_bound_cidrs,
+                                              check_mode=module.check_mode)
     elif state == 'absent':
         try:
             client.read_userpass(name, mount_point=mount_point)
