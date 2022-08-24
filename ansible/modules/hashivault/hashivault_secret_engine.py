@@ -4,6 +4,7 @@ from ansible.module_utils.hashivault import hashivault_argspec
 from ansible.module_utils.hashivault import hashivault_auth_client
 from ansible.module_utils.hashivault import hashivault_init
 from ansible.module_utils.hashivault import hashiwrapper
+from hvac.exceptions import InvalidRequest
 
 DEFAULT_TTL = 2764800
 ANSIBLE_METADATA = {'status': ['stableinterface'], 'supported_by': 'community', 'version': '1.1'}
@@ -63,9 +64,9 @@ def main():
     argspec['state'] = dict(required=False, type='str', choices=['present', 'enabled', 'absent', 'disabled'],
                             default='present')
     argspec['options'] = dict(required=False, type='dict', default={})
-    argspec['cas_required'] = dict(required=False, type='bool')
-    argspec['max_versions'] = dict(required=False, type='int')
-    module = hashivault_init(argspec)
+    argspec['cas_required'] = dict(required=False, type='bool', default=False)
+    argspec['max_versions'] = dict(required=False, type='int', default=0)
+    module = hashivault_init(argspec, supports_check_mode=True)
     result = hashivault_secret_engine(module)
     if result.get('failed'):
         module.fail_json(**result)
@@ -88,6 +89,7 @@ def hashivault_secret_engine(module):
     options = params.get('options')
     cas_required = params.get('cas_required')
     max_versions = params.get('max_versions')
+    engine_configuration = {}
     new_engine_configuration = {}
     if str(options.get('version', '1')) == '2':
         if cas_required:
@@ -106,7 +108,7 @@ def hashivault_secret_engine(module):
         configuration = client.sys.read_mount_configuration(path=name)
         current_state = configuration['data']
         exists = True
-    except Exception:
+    except InvalidRequest:
         # doesn't exist
         pass
 
@@ -124,23 +126,23 @@ def hashivault_secret_engine(module):
                 changed = True
         if 'options' in current_state:
             current_options = current_state['options']
-            if not changed:
-                changed = is_state_changed(options, current_options)
+            if is_state_changed(options, current_options):
+                changed = True
         elif options:
             changed = True
+        for ttl in ['default_lease_ttl', 'max_lease_ttl']:
+            if current_state.get(ttl, None) is not None:
+                # coerce to string for diff purposes, since desired config is always a string
+                current_state[ttl] = str(current_state[ttl])
         for key in config.keys():
             if key not in current_state:
                 changed = True
             elif current_state[key] != config[key]:
                 changed = True
-        if new_engine_configuration and not changed:
+        if new_engine_configuration:
             engine_configuration = client.secrets.kv.read_configuration(name)['data']
-            if cas_required is not None and engine_configuration.get('cas_required', None) != cas_required:
+            if engine_configuration != new_engine_configuration:
                 changed = True
-            elif max_versions is not None and engine_configuration.get('max_versions', None) != max_versions:
-                changed = True
-            else:
-                new_engine_configuration = {}
 
     # create
     if changed and not exists and state == 'enabled' and not module.check_mode:
@@ -157,7 +159,7 @@ def hashivault_secret_engine(module):
     elif changed and exists and state == 'enabled' and not module.check_mode:
         if backend == 'kv':
             client.sys.tune_mount_configuration(path=name, description=description, options=options, **config)
-            if new_engine_configuration:
+            if new_engine_configuration != engine_configuration:
                 client.secrets.kv.v2.configure(mount_point=name, cas_required=cas_required, max_versions=max_versions)
         else:
             client.sys.tune_mount_configuration(path=name, description=description, **config)
@@ -166,7 +168,40 @@ def hashivault_secret_engine(module):
     elif changed and state == 'disabled' and not module.check_mode:
         client.sys.disable_secrets_engine(path=name)
 
-    return {'changed': changed, 'created': created}
+
+    if not changed:
+        return {'changed': changed, 'created': created}
+
+    diff_header = name + '/'
+    diff = dict()
+
+    if exists:
+        diff.update(
+            before=current_state,
+            before_header=diff_header,
+        )
+        diff['before'].update(engine_configuration)
+    else:
+        diff.update(
+            before='',
+            before_header='(disabled)',
+        )
+
+    if state == 'disabled':
+        diff.update(
+            after='',
+            after_header='(disabled)',
+        )
+    else:
+        diff.update(
+            after=config,
+            after_header=diff_header,
+        )
+        diff['after'].update(new_engine_configuration)
+        if options:
+            diff['after'].update(options=options)
+
+    return {'changed': changed, 'created': created, 'diff': diff}
 
 
 if __name__ == '__main__':

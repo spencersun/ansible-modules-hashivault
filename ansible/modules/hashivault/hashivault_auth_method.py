@@ -95,9 +95,17 @@ def hashivault_auth_method(module):
     except Exception:
         pass
 
+    diff = dict()
+    diff_header = '/'.join(['sys', 'auth', mount_point])
     if state == 'enabled' and not exists:
         changed = True
         create = True
+        diff.update(
+            before=dict(),
+            before_header='(new auth method)',
+            after=config,
+            after_header=diff_header,
+        )
     elif state == 'disabled' and exists:
         changed = True
     elif exists and state == 'enabled':
@@ -107,9 +115,17 @@ def hashivault_auth_method(module):
                 changed = True
         if not changed:
             changed = is_state_changed(config, current_state)
+        after = dict(**DEFAULT_CONFIG)
+        after.update(config)
+        diff.update(
+            before=current_state,
+            before_header=diff_header,
+            after=after,
+            after_header=diff_header,
+        )
 
     if module.check_mode:
-        return {'changed': changed, 'created': create, 'state': state}
+        return {'changed': changed, 'created': create, 'state': state, 'diff': diff}
     if not changed:
         return {'changed': changed, 'created': False, 'state': state}
 
@@ -121,7 +137,7 @@ def hashivault_auth_method(module):
     if state == 'disabled':
         client.sys.disable_auth_method(path=mount_point)
 
-    return {'changed': changed, 'created': create}
+    return {'changed': changed, 'created': create, 'diff': diff}
 
 
 if __name__ == '__main__':

@@ -47,8 +47,9 @@ def main():
     argspec['rules_file'] = dict(required=False, type='str')
     argspec['state'] = dict(required=False, choices=['present', 'absent'], default='present')
     mutually_exclusive = [['rules', 'rules_file']]
-    module = hashivault_init(argspec, mutually_exclusive=mutually_exclusive)
-    result = hashivault_policy(module.params)
+    module = hashivault_init(argspec, mutually_exclusive=mutually_exclusive,
+                             supports_check_mode=True)
+    result = hashivault_policy(module.params, check_mode=module.check_mode)
     if result.get('failed'):
         module.fail_json(**result)
     else:
@@ -56,7 +57,7 @@ def main():
 
 
 @hashiwrapper
-def hashivault_policy(params):
+def hashivault_policy(params, check_mode=False):
     client = hashivault_auth_client(params)
     state = params.get('state')
     name = params.get('name')
@@ -74,8 +75,19 @@ def hashivault_policy(params):
         current = client.get_policy(name)
         if current == rules:
             return {'changed': False}
-        client.sys.create_or_update_policy(name, rules)
-        return {'changed': True}
+        if not check_mode:
+            client.sys.create_or_update_policy(name, rules)
+        diff = dict(after=rules, after_header='policy "%s"' % (name))
+        if current is None:
+            diff.update(
+                before='',
+                before_header='(absent)',
+            )
+        else:
+            diff.update(
+                before=current,
+            )
+        return {'changed': True, 'diff': diff}
 
     current_policies = client.sys.list_policies()
     if isinstance(current_policies, dict):
@@ -83,7 +95,8 @@ def hashivault_policy(params):
         current_policies = current_policies.get('policies', current_policies)
     if name not in current_policies:
         return {'changed': False}
-    client.sys.delete_policy(name)
+    if not check_mode:
+        client.sys.delete_policy(name)
     return {'changed': True}
 
 
