@@ -15,14 +15,14 @@ files = [
 long_description = open('README.rst', 'r').read()
 
 setup(
-    name='ansible-modules-hashivault',
-    version='4.6.3',
-    description='Ansible Modules for Hashicorp Vault',
+    name='pure-ansible-hashivault',
+    version='1.0.0',
+    description='Ansible Modules for Hashicorp Vault (pure_ci fork)',
     long_description=long_description,
     long_description_content_type='text/x-rst',
-    author='Terry Howe',
-    author_email='terrylhowe@example.com',
-    url='https://github.com/TerryHowe/ansible-modules-hashivault',
+    author='CI',
+    author_email='ci@purestorage.com',
+    url='https://github.com/spencersun/ansible-modules-hashivault',
     py_modules=py_files,
     packages=files,
     install_requires=[
